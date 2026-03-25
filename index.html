@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="ms">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="eCentral">
+  <meta name="application-name" content="eCentral">
+  <meta name="theme-color" content="#000000">
+  <link rel="manifest" href="manifest.json">
+  <link rel="apple-touch-icon" href="icon-192.png">
+  <title>eCentral</title>
+  <style>
+    html, body {
+      margin: 0; padding: 0;
+      width: 100%; height: 100%;
+      background: #ffffff;
+      overflow: hidden;
+      touch-action: manipulation;
+    }
+    iframe {
+      position: fixed;
+      inset: 0;
+      width: 100vw;
+      height: 100dvh;
+      border: none;
+      display: block;
+    }
+  </style>
+</head>
+<body>
+  <iframe
+    src="https://script.google.com/macros/s/AKfycbwe_vG0R0m6C0uAeBrBMeIFr4Mqi14zJwTr0DYO_jdw3Rv3E1FTR6WUcle3aYTTnXbv1w/exec"
+    allowfullscreen>
+  </iframe>
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/ecentral/sw.js')
+          .then(r => console.log('[eCentral] SW registered:', r.scope))
+          .catch(e => console.warn('[eCentral] SW failed:', e));
+      });
+    }
+  </script>
+</body>
+</html>
