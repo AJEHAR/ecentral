@@ -27,19 +27,155 @@
       border: none;
       display: block;
     }
+    #push-toast {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%) translateY(80px);
+      background: #1e1b4b;
+      color: white;
+      padding: 12px 20px;
+      border-radius: 14px;
+      font-family: sans-serif;
+      font-size: 13px;
+      font-weight: 600;
+      z-index: 9999;
+      opacity: 0;
+      transition: all 0.35s cubic-bezier(0.16,1,0.3,1);
+      white-space: nowrap;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.25);
+      max-width: 90vw;
+      text-overflow: ellipsis;
+      overflow: hidden;
+      pointer-events: none;
+    }
+    #push-toast.show {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
   </style>
 </head>
 <body>
   <iframe
+    id="app-frame"
     src="https://script.google.com/macros/s/AKfycbwe_vG0R0m6C0uAeBrBMeIFr4Mqi14zJwTr0DYO_jdw3Rv3E1FTR6WUcle3aYTTnXbv1w/exec"
     allowfullscreen>
   </iframe>
+
+  <div id="push-toast"></div>
+
   <script>
+    // ══════════════════════════════════════════
+    // KONFIGURASI — TUKAR NILAI INI
+    // ══════════════════════════════════════════
+    const GAS_URL = 'https://script.google.com/macros/s/AKfycbwe_vG0R0m6C0uAeBrBMeIFr4Mqi14zJwTr0DYO_jdw3Rv3E1FTR6WUcle3aYTTnXbv1w/exec';
+
+    const VAPID_PUBLIC_KEY = 'bV0_4wUNztPHX5Hsys9ypcBMfsfbWQ2EO_iUCL5n4eU';
+
+    // ══════════════════════════════════════════
+    // HELPER
+    // ══════════════════════════════════════════
+    function showToast(msg, duration) {
+      duration = duration || 3500;
+      var t = document.getElementById('push-toast');
+      t.textContent = msg;
+      t.classList.add('show');
+      setTimeout(function() { t.classList.remove('show'); }, duration);
+    }
+
+    function urlBase64ToUint8Array(base64String) {
+      var padding = '='.repeat((4 - base64String.length % 4) % 4);
+      var base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+      var rawData = window.atob(base64);
+      var arr = new Uint8Array(rawData.length);
+      for (var i = 0; i < rawData.length; i++) arr[i] = rawData.charCodeAt(i);
+      return arr;
+    }
+
+    // ══════════════════════════════════════════
+    // INIT PUSH — dipanggil selepas login
+    // ══════════════════════════════════════════
+    async function initPush(userId) {
+      if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+        console.warn('[eCentral] Push tidak disokong pada peranti ini.');
+        return;
+      }
+
+      var permission = await Notification.requestPermission();
+      if (permission !== 'granted') {
+        console.warn('[eCentral] Kebenaran notifikasi ditolak.');
+        return;
+      }
+
+      try {
+        var reg = await navigator.serviceWorker.ready;
+        var sub = await reg.pushManager.getSubscription();
+
+        if (!sub) {
+          sub = await reg.pushManager.subscribe({
+            userVisibleOnly: true,
+            applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY)
+          });
+        }
+
+        // Hantar subscription ke GAS untuk disimpan
+        var subStr = JSON.stringify(sub);
+        var url = GAS_URL + '?action=savePushToken'
+                + '&userId=' + encodeURIComponent(userId)
+                + '&sub='    + encodeURIComponent(subStr);
+
+        await fetch(url);
+        console.log('[eCentral] Push subscription berjaya disimpan untuk:', userId);
+        showToast('🔔 Notifikasi jadual diaktifkan!');
+
+      } catch(err) {
+        console.error('[eCentral] Gagal subscribe push:', err);
+      }
+    }
+
+    async function disablePush(userId) {
+      try {
+        var reg = await navigator.serviceWorker.ready;
+        var sub = await reg.pushManager.getSubscription();
+        if (sub) {
+          await sub.unsubscribe();
+          await fetch(GAS_URL + '?action=removePushToken&userId=' + encodeURIComponent(userId));
+          showToast('🔕 Notifikasi dimatikan.');
+        }
+      } catch(e) {
+        console.warn('[eCentral] Gagal disable push:', e);
+      }
+    }
+
+    // ══════════════════════════════════════════
+    // DENGAR MESEJ DARI GAS (dalam iframe)
+    // GAS postMessage({ type:'PUSH_INIT', userId:'...' })
+    // bila cikgu log masuk
+    // ══════════════════════════════════════════
+    window.addEventListener('message', function(event) {
+      // Hanya terima dari Google domains
+      if (!event.origin.includes('script.google.com') &&
+          !event.origin.includes('googleusercontent.com')) return;
+
+      var data = event.data;
+      if (!data || typeof data !== 'object') return;
+
+      if (data.type === 'PUSH_INIT' && data.userId) {
+        initPush(data.userId);
+      }
+      if (data.type === 'PUSH_DISABLE' && data.userId) {
+        disablePush(data.userId);
+      }
+    });
+
+    // ══════════════════════════════════════════
+    // REGISTER SERVICE WORKER
+    // ══════════════════════════════════════════
     if ('serviceWorker' in navigator) {
-      window.addEventListener('load', () => {
+      window.addEventListener('load', function() {
         navigator.serviceWorker.register('/ecentral/sw.js')
-          .then(r => console.log('[eCentral] SW registered:', r.scope))
-          .catch(e => console.warn('[eCentral] SW failed:', e));
+          .then(function(r) { console.log('[eCentral] SW registered:', r.scope); })
+          .catch(function(e) { console.warn('[eCentral] SW failed:', e); });
       });
     }
   </script>
