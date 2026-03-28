@@ -1,5 +1,5 @@
-// eCentral — Service Worker v2 (dengan Push Notification)
-const CACHE_NAME = 'ecentral-v2';
+// eCentral — Service Worker v3 (FCM V1 + Web Push)
+const CACHE_NAME = 'ecentral-v3';
 const STATIC_ASSETS = [
   '/ecentral/',
   '/ecentral/index.html',
@@ -15,6 +15,9 @@ const BYPASS_DOMAINS = [
   'moe-dl.edu.my',
   'fcm.googleapis.com'
 ];
+
+// VAPID key disimpan bila index_pwa.html hantar message
+let _vapidKey = null;
 
 // ── Install ──
 self.addEventListener('install', event => {
@@ -55,71 +58,74 @@ self.addEventListener('fetch', event => {
   );
 });
 
+// ── Terima mesej dari index_pwa.html ──
+self.addEventListener('message', event => {
+  if (event.data && event.data.type === 'SET_VAPID_KEY') {
+    _vapidKey = event.data.vapidKey;
+    console.log('[eCentral SW] VAPID key diterima.');
+  }
+});
+
 // ══════════════════════════════════════════
 // PUSH NOTIFICATION
 // ══════════════════════════════════════════
 
-// ── Terima push dari FCM ──
 self.addEventListener('push', event => {
-  let data = { title: 'eCentral', body: 'Notifikasi baru', icon: '/ecentral/icon-192.png', tag: 'ecentral-notif' };
+  console.log('[eCentral SW] Push diterima:', event.data ? event.data.text() : 'kosong');
+
+  let title = 'eCentral';
+  let body  = 'Notifikasi baru';
+  let tag   = 'ecentral-notif';
+  let url   = 'https://ajehar.github.io/ecentral/';
 
   if (event.data) {
     try {
       const payload = event.data.json();
-      // FCM hantar dalam notification atau data
       if (payload.notification) {
-        data.title = payload.notification.title || data.title;
-        data.body  = payload.notification.body  || data.body;
+        title = payload.notification.title || title;
+        body  = payload.notification.body  || body;
       }
       if (payload.data) {
-        data.title   = payload.data.title   || data.title;
-        data.body    = payload.data.body    || data.body;
-        data.tag     = payload.data.tag     || data.tag;
-        data.url     = payload.data.url     || '';
-        data.subjek  = payload.data.subjek  || '';
-        data.kelas   = payload.data.kelas   || '';
-        data.masa    = payload.data.masa    || '';
+        title = payload.data.title || title;
+        body  = payload.data.body  || body;
+        tag   = payload.data.tag   || tag;
+        url   = payload.data.url   || url;
       }
     } catch(e) {
-      data.body = event.data.text();
+      try { body = event.data.text(); } catch(e2) {}
     }
   }
 
-  const options = {
-    body:    data.body,
-    icon:    '/ecentral/icon-192.png',
-    badge:   '/ecentral/icon-192.png',
-    tag:     data.tag,
-    vibrate: [200, 100, 200],
-    data:    { url: data.url || 'https://ajehar.github.io/ecentral/' },
-    actions: [
-      { action: 'buka', title: '📖 Buka App' },
-      { action: 'tutup', title: '✕ Tutup' }
-    ]
-  };
-
   event.waitUntil(
-    self.registration.showNotification(data.title, options)
+    self.registration.showNotification(title, {
+      body:     body,
+      icon:     '/ecentral/icon-192.png',
+      badge:    '/ecentral/icon-192.png',
+      tag:      tag,
+      renotify: true,
+      vibrate:  [200, 100, 200],
+      data:     { url: url },
+      actions:  [
+        { action: 'buka',  title: '📖 Buka App' },
+        { action: 'tutup', title: '✕ Tutup'     }
+      ]
+    })
   );
 });
 
-// ── Klik pada notifikasi ──
 self.addEventListener('notificationclick', event => {
   event.notification.close();
-
   if (event.action === 'tutup') return;
 
-  const urlToOpen = event.notification.data?.url || 'https://ajehar.github.io/ecentral/';
+  const urlToOpen = (event.notification.data && event.notification.data.url)
+    ? event.notification.data.url
+    : 'https://ajehar.github.io/ecentral/';
 
   event.waitUntil(
     clients.matchAll({ type: 'window', includeUncontrolled: true }).then(clientList => {
-      // Kalau app dah buka, focus je
       for (const client of clientList) {
-        if (client.url.includes('ecentral') && 'focus' in client) {
-          return client.focus();
-        }
+        if (client.url.includes('ecentral') && 'focus' in client) return client.focus();
       }
-      // Kalau tak, buka tab baru
       if (clients.openWindow) return clients.openWindow(urlToOpen);
     })
   );
@@ -127,17 +133,30 @@ self.addEventListener('notificationclick', event => {
 
 // ── Push subscription berubah (token expired) ──
 self.addEventListener('pushsubscriptionchange', event => {
+  console.log('[eCentral SW] Subscription berubah, renew...');
+  if (!_vapidKey) {
+    console.warn('[eCentral SW] VAPID key tiada, tidak boleh renew.');
+    return;
+  }
+
+  function urlBase64ToUint8Array(b) {
+    var pad = '='.repeat((4 - b.length % 4) % 4);
+    var s = (b + pad).replace(/-/g, '+').replace(/_/g, '/');
+    var raw = atob(s);
+    var arr = new Uint8Array(raw.length);
+    for (var i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
+    return arr;
+  }
+
   event.waitUntil(
     self.registration.pushManager.subscribe({
       userVisibleOnly: true,
-      applicationServerKey: self._vapidKey
-    }).then(sub => {
-      // Hantar token baru ke GAS
-      return fetch('https://script.google.com/macros/s/AKfycbwe_vG0R0m6C0uAeBrBMeIFr4Mqi14zJwTr0DYO_jdw3Rv3E1FTR6WUcle3aYTTnXbv1w/exec', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'updatePushToken', subscription: JSON.stringify(sub) })
+      applicationServerKey: urlBase64ToUint8Array(_vapidKey)
+    }).then(newSub => {
+      // Hantar ke client untuk proses dengan userId
+      return clients.matchAll({ type: 'window' }).then(list => {
+        list.forEach(c => c.postMessage({ type: 'PUSH_RENEW', sub: JSON.stringify(newSub) }));
       });
-    })
+    }).catch(err => console.error('[eCentral SW] Gagal renew:', err))
   );
 });
