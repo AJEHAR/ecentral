@@ -66,10 +66,13 @@
 
   <script>
     // ══════════════════════════════════════════
-    // KONFIGURASI — TUKAR NILAI INI
+    // KONFIGURASI
     // ══════════════════════════════════════════
     const GAS_URL = 'https://script.google.com/macros/s/AKfycbwe_vG0R0m6C0uAeBrBMeIFr4Mqi14zJwTr0DYO_jdw3Rv3E1FTR6WUcle3aYTTnXbv1w/exec';
 
+    // ⚠️ VAPID KEY — mesti ambil dari Firebase Console:
+    // Project Settings → Cloud Messaging → Web configuration → Key pair
+    // Klik "Generate key pair" kalau belum ada, copy Public Key
     const VAPID_PUBLIC_KEY = 'bV0_4wUNztPHX5Hsys9ypcBMfsfbWQ2EO_iUCL5n4eU';
 
     // ══════════════════════════════════════════
@@ -85,11 +88,53 @@
 
     function urlBase64ToUint8Array(base64String) {
       var padding = '='.repeat((4 - base64String.length % 4) % 4);
-      var base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+      var base64  = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
       var rawData = window.atob(base64);
-      var arr = new Uint8Array(rawData.length);
+      var arr     = new Uint8Array(rawData.length);
       for (var i = 0; i < rawData.length; i++) arr[i] = rawData.charCodeAt(i);
       return arr;
+    }
+
+    // Simpan SW registration untuk guna semula
+    var _swReg = null;
+    // Simpan userId semasa untuk handle PUSH_RENEW
+    var _currentUserId = null;
+
+    // ══════════════════════════════════════════
+    // REGISTER SERVICE WORKER
+    // ══════════════════════════════════════════
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', function() {
+        navigator.serviceWorker.register('/ecentral/sw.js')
+          .then(function(reg) {
+            _swReg = reg;
+            console.log('[eCentral] SW registered:', reg.scope);
+
+            // Hantar VAPID key ke SW supaya boleh handle pushsubscriptionchange
+            var sw = reg.installing || reg.waiting || reg.active;
+            if (sw) {
+              sw.postMessage({ type: 'SET_VAPID_KEY', vapidKey: VAPID_PUBLIC_KEY });
+            }
+            // Hantar semula bila SW active
+            navigator.serviceWorker.addEventListener('controllerchange', function() {
+              if (navigator.serviceWorker.controller) {
+                navigator.serviceWorker.controller.postMessage({ type: 'SET_VAPID_KEY', vapidKey: VAPID_PUBLIC_KEY });
+              }
+            });
+          })
+          .catch(function(e) { console.warn('[eCentral] SW failed:', e); });
+
+        // Dengar mesej dari SW (untuk handle PUSH_RENEW)
+        navigator.serviceWorker.addEventListener('message', function(event) {
+          if (event.data && event.data.type === 'PUSH_RENEW' && _currentUserId) {
+            console.log('[eCentral] SW minta renew subscription untuk userId:', _currentUserId);
+            var url = GAS_URL + '?action=savePushToken'
+                    + '&userId=' + encodeURIComponent(_currentUserId)
+                    + '&sub='    + encodeURIComponent(event.data.sub);
+            fetch(url).catch(function(e) { console.warn('[eCentral] Gagal renew token:', e); });
+          }
+        });
+      });
     }
 
     // ══════════════════════════════════════════
@@ -101,22 +146,34 @@
         return;
       }
 
+      _currentUserId = userId;
+
       var permission = await Notification.requestPermission();
       if (permission !== 'granted') {
         console.warn('[eCentral] Kebenaran notifikasi ditolak.');
+        showToast('🔕 Notifikasi ditolak. Sila benarkan dalam tetapan browser.');
         return;
       }
 
       try {
-        var reg = await navigator.serviceWorker.ready;
+        var reg = _swReg || await navigator.serviceWorker.ready;
+
+        // Hantar VAPID key ke SW (setiap kali initPush dipanggil)
+        if (reg.active) {
+          reg.active.postMessage({ type: 'SET_VAPID_KEY', vapidKey: VAPID_PUBLIC_KEY });
+        }
+
         var sub = await reg.pushManager.getSubscription();
 
         if (!sub) {
+          console.log('[eCentral] Tiada subscription, buat baru...');
           sub = await reg.pushManager.subscribe({
             userVisibleOnly: true,
             applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY)
           });
         }
+
+        console.log('[eCentral] Subscription endpoint:', sub.endpoint);
 
         // Hantar subscription ke GAS untuk disimpan
         var subStr = JSON.stringify(sub);
@@ -124,18 +181,26 @@
                 + '&userId=' + encodeURIComponent(userId)
                 + '&sub='    + encodeURIComponent(subStr);
 
-        await fetch(url);
-        console.log('[eCentral] Push subscription berjaya disimpan untuk:', userId);
-        showToast('🔔 Notifikasi jadual diaktifkan!');
+        var resp = await fetch(url);
+        var data = await resp.json();
+        console.log('[eCentral] savePushToken response:', data);
+
+        if (data.success) {
+          showToast('🔔 Notifikasi jadual diaktifkan!');
+        } else {
+          console.warn('[eCentral] GAS gagal simpan token:', data);
+        }
 
       } catch(err) {
         console.error('[eCentral] Gagal subscribe push:', err);
+        showToast('⚠️ Gagal aktifkan notifikasi: ' + err.message);
       }
     }
 
     async function disablePush(userId) {
+      _currentUserId = null;
       try {
-        var reg = await navigator.serviceWorker.ready;
+        var reg = _swReg || await navigator.serviceWorker.ready;
         var sub = await reg.pushManager.getSubscription();
         if (sub) {
           await sub.unsubscribe();
@@ -149,8 +214,6 @@
 
     // ══════════════════════════════════════════
     // DENGAR MESEJ DARI GAS (dalam iframe)
-    // GAS postMessage({ type:'PUSH_INIT', userId:'...' })
-    // bila cikgu log masuk
     // ══════════════════════════════════════════
     window.addEventListener('message', function(event) {
       // Hanya terima dari Google domains
@@ -163,21 +226,10 @@
       if (data.type === 'PUSH_INIT' && data.userId) {
         initPush(data.userId);
       }
-      if (data.type === 'PUSH_DISABLE' && data.userId) {
-        disablePush(data.userId);
+      if (data.type === 'PUSH_DISABLE') {
+        disablePush(data.userId || '');
       }
     });
-
-    // ══════════════════════════════════════════
-    // REGISTER SERVICE WORKER
-    // ══════════════════════════════════════════
-    if ('serviceWorker' in navigator) {
-      window.addEventListener('load', function() {
-        navigator.serviceWorker.register('/ecentral/sw.js')
-          .then(function(r) { console.log('[eCentral] SW registered:', r.scope); })
-          .catch(function(e) { console.warn('[eCentral] SW failed:', e); });
-      });
-    }
   </script>
 </body>
 </html>
